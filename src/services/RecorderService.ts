@@ -44,9 +44,11 @@ export class RecorderService {
                 await this.stopRecording();
             }
 
-            console.log('[Recorder] Launching browser...');
+            const headlessParam = process.env.HEADLESS !== 'false';
+            console.log(`[Recorder] Launching browser (Headless: ${headlessParam}, Env: ${process.env.HEADLESS})...`);
+
             this.browser = await chromium.launch({
-                headless: true,
+                headless: headlessParam,
                 args: ['--no-sandbox', '--disable-setuid-sandbox']
             });
             this.context = await this.browser.newContext();
@@ -347,7 +349,7 @@ export class RecorderService {
         };
 
         const browser = await chromium.launch({
-            headless: true,
+            headless: process.env.HEADLESS !== 'false',
             args: ['--no-sandbox', '--disable-setuid-sandbox']
         });
         const context = await browser.newContext();
