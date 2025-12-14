@@ -18,3 +18,17 @@ Error: Error: [GoogleGenerativeAI Error]: Error fetching from https://generative
     at GenAIService.generateBulkTestCases (F:\second\Bug-binder-add1\bug-binder\backend\src\services\GenAIService.ts:249:28)
     at F:\second\Bug-binder-add1\bug-binder\backend\src\routes\ai.ts:65:24
 -------------------
+
+[2025-12-13T06:59:16.963Z] generateBulkTestCases Response
+Content Preview: [
+    {
+        "module": "Login",
+        "testCaseId": "TC_AI_AUTO_01",
+        "testScenario": "Successful Login with Valid Username and Password",
+        "testCaseDescription": "Verify that a registered user can successfully log in using valid username and password credentials.",
+        "preConditions": [
+            "1. User is registered and has valid credentials (username: 'testuser', password: 'Password123!')",
+            "2. User is currently logged out."
+        ],
+        "testStep...
+-------------------

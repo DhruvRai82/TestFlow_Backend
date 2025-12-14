@@ -3,6 +3,14 @@ import { genAIService } from '../services/GenAIService';
 
 const router = Router();
 
+// Helper to extract AI config from headers
+const getAIConfig = (req: any) => {
+    return {
+        apiKey: req.headers['x-ai-custom-key'] as string | undefined,
+        model: req.headers['x-ai-custom-model'] as string | undefined
+    };
+};
+
 // Generate Test Cases
 router.post('/generate-tests', async (req, res) => {
     try {
@@ -11,7 +19,7 @@ router.post('/generate-tests', async (req, res) => {
             return res.status(400).json({ error: 'Requirements text is required' });
         }
 
-        const result = await genAIService.generateTestCases(requirements);
+        const result = await genAIService.generateTestCases(requirements, getAIConfig(req));
         res.json({ result });
     } catch (error) {
         console.error('Error generating tests:', error);
@@ -28,7 +36,7 @@ router.post('/summarize-bug', async (req, res) => {
             return res.status(400).json({ error: 'Bug description is required' });
         }
 
-        const result = await genAIService.summarizeBug(description);
+        const result = await genAIService.summarizeBug(description, getAIConfig(req));
         res.json(result);
     } catch (error) {
         console.error('Error summarizing bug:', error);
@@ -44,7 +52,7 @@ router.post('/generate-test-case', async (req, res) => {
             return res.status(400).json({ error: 'Prompt is required' });
         }
 
-        const result = await genAIService.generateStructuredTestCase(prompt);
+        const result = await genAIService.generateStructuredTestCase(prompt, getAIConfig(req));
         res.json(result);
     } catch (error) {
         console.error('Error generating structured test case:', error);
@@ -60,9 +68,7 @@ router.post('/generate-bulk-test-cases', async (req, res) => {
             return res.status(400).json({ error: 'Prompt is required' });
         }
 
-        // Increase timeout for this request if possible at server level, 
-        // but here we just await the long process.
-        const result = await genAIService.generateBulkTestCases(prompt);
+        const result = await genAIService.generateBulkTestCases(prompt, getAIConfig(req));
         res.json(result);
     } catch (error) {
         console.error('Error generating bulk test cases:', error);

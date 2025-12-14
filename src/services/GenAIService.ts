@@ -38,51 +38,71 @@ const logResponseToFile = (message: string, content: string) => {
     }
 };
 
+interface AIConfig {
+    apiKey?: string;
+    model?: string;
+}
+
 export class GenAIService {
-    private genAI: GoogleGenerativeAI;
-    private model: any;
+    private defaultGenAI: GoogleGenerativeAI;
+    private defaultModel: any;
 
     constructor() {
         const apiKey = process.env.GEMINI_API_KEY;
-        console.log(`[GenAIService] Initializing with API Key present: ${!!apiKey}`);
+        console.log(`[GenAIService] Initializing default with API Key present: ${!!apiKey}`);
 
         if (!apiKey) {
             console.error('[GenAIService] FATAL: GEMINI_API_KEY is missing in environment variables!');
-            // Initialize with dummy key to prevent crash on startup
-            this.genAI = new GoogleGenerativeAI('dummy_key');
+            this.defaultGenAI = new GoogleGenerativeAI('dummy_key');
         } else {
-            this.genAI = new GoogleGenerativeAI(apiKey);
+            this.defaultGenAI = new GoogleGenerativeAI(apiKey);
         }
 
-        // Using gemini-1.5-flash as the standard stable model
-        this.model = this.genAI.getGenerativeModel({
-            model: "gemini-2.5-flash",
-            safetySettings: [
-                {
-                    category: HarmCategory.HARM_CATEGORY_HARASSMENT,
-                    threshold: HarmBlockThreshold.BLOCK_NONE,
-                },
-                {
-                    category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
-                    threshold: HarmBlockThreshold.BLOCK_NONE,
-                },
-                {
-                    category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
-                    threshold: HarmBlockThreshold.BLOCK_NONE,
-                },
-                {
-                    category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
-                    threshold: HarmBlockThreshold.BLOCK_NONE,
-                },
-            ]
+        // Default Model
+        this.defaultModel = this.defaultGenAI.getGenerativeModel({
+            model: "gemini-1.5-flash",
+            safetySettings: this.getSafetySettings()
         });
-        console.log(`[GenAIService] Active Model: gemini-1.5-flash`);
+        console.log(`[GenAIService] Default Active Model: gemini-1.5-flash`);
     }
 
-    async generateTestCases(requirements: string): Promise<string> {
-        if (!process.env.GEMINI_API_KEY) {
-            throw new Error("AI Service is not configured (Missing GEMINI_API_KEY).");
+    private getSafetySettings() {
+        return [
+            { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+            { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+            { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+            { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+        ];
+    }
+
+    // Helper to get the correct model instance (Default or Custom)
+    private getModelInstance(config?: AIConfig) {
+        if (config?.apiKey) {
+            console.log(`[GenAIService] ⚡ Using CUSTOM API KEY provided by user.`);
+            const customGenAI = new GoogleGenerativeAI(config.apiKey);
+            const modelName = config.model || "gemini-1.5-flash"; // Default manual override
+            console.log(`[GenAIService] ⚡ Using CUSTOM MODEL: ${modelName}`);
+
+            return customGenAI.getGenerativeModel({
+                model: modelName,
+                safetySettings: this.getSafetySettings()
+            });
         }
+
+        // Fallback to default
+        if (config?.model) {
+            console.log(`[GenAIService] ⚡ Using Default Key but CUSTOM MODEL: ${config.model}`);
+            return this.defaultGenAI.getGenerativeModel({
+                model: config.model,
+                safetySettings: this.getSafetySettings()
+            });
+        }
+
+        return this.defaultModel;
+    }
+
+    async generateTestCases(requirements: string, config?: AIConfig): Promise<string> {
+        const model = this.getModelInstance(config);
 
         const prompt = `
         Act as a QA Engineer. Based on the following requirements, generate a list of structured test cases.
@@ -99,7 +119,7 @@ export class GenAIService {
         `;
 
         try {
-            const result = await this.model.generateContent(prompt);
+            const result = await model.generateContent(prompt);
             const response = await result.response;
             return response.text();
         } catch (error) {
@@ -109,18 +129,8 @@ export class GenAIService {
         }
     }
 
-    async summarizeBug(description: string): Promise<{
-        title: string;
-        description: string;
-        stepsToReproduce: string;
-        expectedResult: string;
-        actualResult: string;
-        severity: string;
-        priority: string;
-    }> {
-        if (!process.env.GEMINI_API_KEY) {
-            throw new Error("AI Service is not configured (Missing GEMINI_API_KEY).");
-        }
+    async summarizeBug(description: string, config?: AIConfig): Promise<any> {
+        const model = this.getModelInstance(config);
 
         const prompt = `
         Act as a QA Lead. Analyze the following verbose bug description/logs and generate a structured Bug Report.
@@ -141,11 +151,10 @@ export class GenAIService {
         `;
 
         try {
-            const result = await this.model.generateContent(prompt);
+            const result = await model.generateContent(prompt);
             const response = await result.response;
             const text = response.text();
 
-            // Extract JSON from potential markdown code blocks
             const jsonMatch = text.match(/\{[\s\S]*\}/);
             if (jsonMatch) {
                 return JSON.parse(jsonMatch[0]);
@@ -158,10 +167,8 @@ export class GenAIService {
         }
     }
 
-    async generateStructuredTestCase(prompt: string): Promise<any> {
-        if (!process.env.GEMINI_API_KEY) {
-            throw new Error("AI Service is not configured (Missing GEMINI_API_KEY).");
-        }
+    async generateStructuredTestCase(prompt: string, config?: AIConfig): Promise<any> {
+        const model = this.getModelInstance(config);
 
         const systemPrompt = `
         Act as a Senior QA Automation Engineer.
@@ -191,11 +198,10 @@ export class GenAIService {
         `;
 
         try {
-            const result = await this.model.generateContent(systemPrompt);
+            const result = await model.generateContent(systemPrompt);
             const response = await result.response;
             const text = response.text();
 
-            // Clean up: find JSON start/end
             const jsonStart = text.indexOf('{');
             const jsonEnd = text.lastIndexOf('}');
             if (jsonStart !== -1 && jsonEnd !== -1) {
@@ -211,10 +217,8 @@ export class GenAIService {
         }
     }
 
-    async generateBulkTestCases(prompt: string): Promise<any[]> {
-        if (!process.env.GEMINI_API_KEY) {
-            throw new Error("AI Service is not configured (Missing GEMINI_API_KEY).");
-        }
+    async generateBulkTestCases(prompt: string, config?: AIConfig): Promise<any[]> {
+        const model = this.getModelInstance(config);
 
         console.log("--> BACKEND: GenAIService generating BULK test cases, prompt len:", prompt.length);
 
@@ -246,14 +250,13 @@ export class GenAIService {
         `;
 
         try {
-            const result = await this.model.generateContent(systemPrompt);
+            const result = await model.generateContent(systemPrompt);
             const response = await result.response;
             const text = response.text();
 
             console.log("--> BACKEND: AI Response Length:", text.length);
             logResponseToFile("generateBulkTestCases Response", text);
 
-            // Extract JSON Array
             const jsonStart = text.indexOf('[');
             const jsonEnd = text.lastIndexOf(']');
             if (jsonStart !== -1 && jsonEnd !== -1) {
@@ -261,7 +264,6 @@ export class GenAIService {
                 return JSON.parse(jsonStr);
             }
 
-            // Fallback
             return JSON.parse(text);
 
         } catch (error) {
