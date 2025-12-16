@@ -1,151 +1,114 @@
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import fs from 'fs';
+import path from 'path';
+import { PNG } from 'pngjs';
+import pixelmatch from 'pixelmatch';
 
-export interface VisualTest {
-    id: string;
-    name: string;
-    baselineImage?: string;
-    latestImage?: string;
-    diffImage?: string; // Optional, might be generated on frontend but we store filename if needed
-    matchPercentage?: number;
-    status: 'new' | 'pass' | 'fail';
-    updatedAt: string;
+const STORAGE_DIR = path.join(__dirname, '../../storage');
+const BASELINE_DIR = path.join(STORAGE_DIR, 'baselines');
+const LATEST_DIR = path.join(STORAGE_DIR, 'latest');
+const DIFF_DIR = path.join(STORAGE_DIR, 'diffs');
+
+// Ensure directories exist
+[BASELINE_DIR, LATEST_DIR, DIFF_DIR].forEach(dir => {
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+    }
+});
+
+interface VisualMismatch {
+    scriptId: string;
+    diffPercentage: number;
+    hasBaseline: boolean;
 }
 
-const DATA_DIR = path.join(__dirname, '../../data');
-const TESTS_FILE = path.join(DATA_DIR, 'visual-tests.json');
-const IMAGES_DIR = path.join(DATA_DIR, 'visual-images');
-
 export class VisualTestService {
-    private async ensureDirs() {
-        try { await fs.access(DATA_DIR); } catch { await fs.mkdir(DATA_DIR, { recursive: true }); }
-        try { await fs.access(IMAGES_DIR); } catch { await fs.mkdir(IMAGES_DIR, { recursive: true }); }
+
+    private getPath(scriptId: string, type: 'baseline' | 'latest' | 'diff') {
+        const dir = type === 'baseline' ? BASELINE_DIR : type === 'latest' ? LATEST_DIR : DIFF_DIR;
+        return path.join(dir, `${scriptId}.png`);
     }
 
-    private async readTests(): Promise<VisualTest[]> {
-        await this.ensureDirs();
+    async saveBaseline(scriptId: string, imageBuffer: Buffer): Promise<void> {
+        return fs.promises.writeFile(this.getPath(scriptId, 'baseline'), imageBuffer);
+    }
+
+    async saveLatest(scriptId: string, imageBuffer: Buffer): Promise<void> {
+        return fs.promises.writeFile(this.getPath(scriptId, 'latest'), imageBuffer);
+    }
+
+    async getBaseline(scriptId: string): Promise<Buffer | null> {
         try {
-            const data = await fs.readFile(TESTS_FILE, 'utf-8');
-            return JSON.parse(data);
-        } catch (error) {
-            return [];
+            return await fs.promises.readFile(this.getPath(scriptId, 'baseline'));
+        } catch {
+            return null;
         }
     }
 
-    private async writeTests(tests: VisualTest[]) {
-        await this.ensureDirs();
-        await fs.writeFile(TESTS_FILE, JSON.stringify(tests, null, 2));
-    }
+    async compare(scriptId: string, currentImageBuffer: Buffer): Promise<VisualMismatch> {
+        const baselinePath = this.getPath(scriptId, 'baseline');
 
-    async getAllTests(): Promise<VisualTest[]> {
-        return this.readTests();
-    }
+        // Save current run always
+        await this.saveLatest(scriptId, currentImageBuffer);
 
-    async createTest(name: string): Promise<VisualTest> {
-        const tests = await this.readTests();
-        const newTest: VisualTest = {
-            id: crypto.randomUUID(),
-            name,
-            status: 'new',
-            updatedAt: new Date().toISOString()
-        };
-        tests.push(newTest);
-        await this.writeTests(tests);
-        return newTest;
-    }
-
-    async updateTestStatus(id: string, status: 'pass' | 'fail', matchPercentage?: number): Promise<VisualTest> {
-        const tests = await this.readTests();
-        const index = tests.findIndex(t => t.id === id);
-        if (index === -1) throw new Error('Test not found');
-
-        tests[index] = {
-            ...tests[index],
-            status,
-            matchPercentage,
-            updatedAt: new Date().toISOString()
-        };
-        await this.writeTests(tests);
-        return tests[index];
-    }
-
-    async saveImage(testId: string, type: 'baseline' | 'latest', imageBuffer: Buffer): Promise<string> {
-        await this.ensureDirs();
-        const filename = `${testId}-${type}.png`;
-        const filepath = path.join(IMAGES_DIR, filename);
-        await fs.writeFile(filepath, imageBuffer);
-
-        const tests = await this.readTests();
-        const index = tests.findIndex(t => t.id === testId);
-        if (index !== -1) {
-            if (type === 'baseline') tests[index].baselineImage = filename;
-            if (type === 'latest') tests[index].latestImage = filename;
-            tests[index].updatedAt = new Date().toISOString();
-            await this.writeTests(tests);
+        if (!fs.existsSync(baselinePath)) {
+            // First run, no baseline. Auto-approve? Or wait for manual approval?
+            // Usually valid to wait.
+            return { scriptId, diffPercentage: 0, hasBaseline: false };
         }
 
-        return filename;
+        const baselineImg = PNG.sync.read(fs.readFileSync(baselinePath));
+        const currentImg = PNG.sync.read(currentImageBuffer);
+
+        const { width, height } = baselineImg;
+        const diff = new PNG({ width, height });
+
+        // Resize current if dimensions don't match (simple approach: fail if mismatch, but for now just handle same size)
+        if (width !== currentImg.width || height !== currentImg.height) {
+            // Dimension mismatch is a bug in itself
+            return { scriptId, diffPercentage: 100, hasBaseline: true };
+        }
+
+        const numDiffPixels = pixelmatch(
+            baselineImg.data,
+            currentImg.data,
+            diff.data,
+            width,
+            height,
+            { threshold: 0.1 }
+        );
+
+        const totalPixels = width * height;
+        const diffPercentage = (numDiffPixels / totalPixels) * 100;
+
+        if (diffPercentage > 0) {
+            fs.writeFileSync(this.getPath(scriptId, 'diff'), PNG.sync.write(diff));
+        }
+
+        return { scriptId, diffPercentage, hasBaseline: true };
     }
 
-    async updateTest(id: string, name: string): Promise<VisualTest> {
-        const tests = await this.readTests();
-        const index = tests.findIndex(t => t.id === id);
-        if (index === -1) throw new Error('Test not found');
-
-        tests[index].name = name;
-        tests[index].updatedAt = new Date().toISOString();
-        await this.writeTests(tests);
-        return tests[index];
+    getImages(scriptId: string) {
+        return {
+            baseline: this.getPath(scriptId, 'baseline'),
+            latest: this.getPath(scriptId, 'latest'),
+            diff: this.getPath(scriptId, 'diff')
+        };
     }
 
-    async deleteTest(id: string): Promise<void> {
-        const tests = await this.readTests();
-        const index = tests.findIndex(t => t.id === id);
-        if (index === -1) return; // Idempotent
+    async approveLatest(scriptId: string): Promise<void> {
+        const latestPath = this.getPath(scriptId, 'latest');
+        const baselinePath = this.getPath(scriptId, 'baseline');
 
-        const test = tests[index];
-        // Delete associated images
-        const imagesToDelete = [test.baselineImage, test.latestImage, test.diffImage].filter(Boolean);
-        for (const img of imagesToDelete) {
-            try {
-                if (img) await fs.unlink(path.join(IMAGES_DIR, img));
-            } catch (e) {
-                console.error(`Failed to delete image ${img}:`, e);
+        if (fs.existsSync(latestPath)) {
+            await fs.promises.copyFile(latestPath, baselinePath);
+            // Clear diff if exists
+            const diffPath = this.getPath(scriptId, 'diff');
+            if (fs.existsSync(diffPath)) {
+                await fs.promises.unlink(diffPath);
             }
+        } else {
+            throw new Error("No latest run to approve");
         }
-
-        tests.splice(index, 1);
-        await this.writeTests(tests);
-    }
-
-    async promoteLatestToBaseline(testId: string): Promise<void> {
-        const tests = await this.readTests();
-        const index = tests.findIndex(t => t.id === testId);
-        if (index === -1) throw new Error('Test not found');
-
-        const test = tests[index];
-        if (!test.latestImage) throw new Error('No latest image to promote');
-
-        // Copy latest to baseline filename (or just update reference, but copying is safer for history)
-        const latestPath = path.join(IMAGES_DIR, test.latestImage);
-        const baselineFilename = `${testId}-baseline-${Date.now()}.png`;
-        const baselinePath = path.join(IMAGES_DIR, baselineFilename);
-
-        try {
-            await fs.copyFile(latestPath, baselinePath);
-            test.baselineImage = baselineFilename;
-            test.status = 'pass'; // Reset status after promotion
-            test.matchPercentage = 100;
-            test.updatedAt = new Date().toISOString();
-            await this.writeTests(tests);
-        } catch (error) {
-            console.error('Error promoting image:', error);
-            throw new Error('Failed to promote image');
-        }
-    }
-
-    getImagePath(filename: string): string {
-        return path.join(IMAGES_DIR, filename);
     }
 }
 

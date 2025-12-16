@@ -14,6 +14,7 @@ export interface ExecutionReport {
     stepsCompleted: number;
     totalSteps: number;
     userId?: string;
+    logs?: string;
 }
 
 export class ReportService {
@@ -31,7 +32,8 @@ export class ReportService {
             error: report.error,
             steps_completed: report.stepsCompleted,
             total_steps: report.totalSteps,
-            user_id: report.userId
+            user_id: report.userId,
+            logs: report.logs
         };
 
         const { data, error } = await supabase

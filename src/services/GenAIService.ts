@@ -272,6 +272,46 @@ export class GenAIService {
             throw new Error(`Failed to generate bulk test cases: ${(error as Error).message}`);
         }
     }
+
+    async healSelector(htmlSnippet: string, oldSelector: string, errorMsg: string, config?: AIConfig): Promise<string | null> {
+        const model = this.getModelInstance(config);
+
+        const prompt = `
+        Act as a Test Automation Expert (Playwright).
+        A test failed because the element with selector "${oldSelector}" was not found.
+        
+        Error Message: "${errorMsg}"
+        
+        Using the provided HTML Snippet of the current page state, identify the NEW selector for the element that most likely corresponds to the old one.
+        Analyze attributes like id, class, name, text content, and structure.
+        
+        HTML Snippet:
+        \`\`\`html
+        ${htmlSnippet.substring(0, 15000)} 
+        \`\`\`
+        
+        (Note: HTML is truncated to 15k chars to fit context window if large).
+
+        OUTPUT FORMAT:
+        Return ONLY the new selector string. Do not return JSON. Do not return Markdown. 
+        If you cannot confidently find the element, return "null" (string).
+        `;
+
+        try {
+            const result = await model.generateContent(prompt);
+            const response = await result.response;
+            const text = response.text().trim();
+
+            if (text.toLowerCase() === 'null') return null;
+
+            // Cleanup if AI returns quotes or backticks
+            return text.replace(/`/g, '').replace(/"/g, '').replace(/'/g, '');
+        } catch (error) {
+            logErrorToFile("healSelector Failed", error);
+            console.error("Error healing selector:", error);
+            return null;
+        }
+    }
 }
 
 export const genAIService = new GenAIService();

@@ -3,6 +3,9 @@ import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { Server } from 'socket.io';
 import { ReportService } from './ReportService';
 import { supabase } from '../lib/supabase';
+import { genAIService } from './GenAIService';
+import { visualTestService } from './VisualTestService';
+import { testDataService } from './TestDataService';
 
 interface RecordedStep {
     command: string;
@@ -40,12 +43,14 @@ export class RecorderService {
     async startRecording(url: string) {
         try {
             console.log(`[Recorder] Starting recording for ${url}`);
+            const headlessParam = process.env.HEADLESS !== 'false';
+
+            // Only close previous if recording
             if (this.isRecording) {
                 await this.stopRecording();
             }
 
-            const headlessParam = process.env.HEADLESS !== 'false';
-            console.log(`[Recorder] Launching browser (Headless: ${headlessParam}, Env: ${process.env.HEADLESS})...`);
+            console.log(`[Recorder] Launching browser (Headless: ${headlessParam})...`);
 
             this.browser = await chromium.launch({
                 headless: headlessParam,
@@ -279,6 +284,19 @@ export class RecorderService {
         };
     }
 
+    async updateScriptSteps(scriptId: string, steps: RecordedStep[]) {
+        const { error } = await supabase
+            .from('recorded_scripts')
+            .update({ steps: steps })
+            .eq('id', scriptId);
+
+        if (error) {
+            console.error('Failed to update script steps after healing:', error);
+        } else {
+            console.log(`[Recorder] Successfully updated script ${scriptId} with healed steps.`);
+        }
+    }
+
     async deleteScript(scriptId: string, userId?: string) {
         let query = supabase
             .from('recorded_scripts')
@@ -330,7 +348,7 @@ export class RecorderService {
         }));
     }
 
-    async playScript(scriptId: string, userId?: string) {
+    async playScript(scriptId: string, userId?: string): Promise<{ status: 'pass' | 'fail', logs: string }> {
         let query = supabase.from('recorded_scripts').select('*').eq('id', scriptId);
         if (userId) query = query.eq('user_id', userId);
 
@@ -356,7 +374,13 @@ export class RecorderService {
         const page = await context.newPage();
 
         const startTime = Date.now();
+        const logs: string[] = [];
+        const log = (msg: string) => {
+            console.log(msg);
+            logs.push(msg);
+        };
         let stepsCompleted = 0;
+        let scriptWasHealed = false;
 
         try {
             for (let i = 0; i < script.steps.length; i++) {
@@ -370,29 +394,102 @@ export class RecorderService {
                     target = step.target;
                 }
 
-                console.log(`[Recorder] Executing: ${step.command} on ${target}`);
+                log(`[Recorder] Executing: ${step.command} on ${target}`);
 
-                this.io?.emit('recorder:step:start', { index: i, step });
+                if (this.io) {
+                    this.io.emit('recorder:step:start', { index: i, step });
+                }
 
                 try {
                     if (step.command === 'open') {
                         await page.goto(step.target);
                     } else if (step.command === 'click') {
-                        await page.click(target);
+                        // Increase timeout slightly mainly for healing detection time, keeping default but handling error
+                        await page.click(target, { timeout: 5000 });
                     } else if (step.command === 'type') {
-                        await page.fill(target, step.value);
+                        await page.fill(target, step.value, { timeout: 5000 });
                     }
 
-                    this.io?.emit('recorder:step:success', { index: i });
+                    if (this.io) {
+                        this.io.emit('recorder:step:success', { index: i });
+                    }
                     stepsCompleted++;
                 } catch (stepError: any) {
-                    this.io?.emit('recorder:step:error', { index: i, error: stepError.message });
+                    // --- SELF HEALING LOGIC START ---
+                    const errorMessage = stepError.message || '';
+                    if ((errorMessage.includes('Timeout') || errorMessage.includes('waiting for selector')) && step.command !== 'open') {
+                        log(`[Healer] 🩹 Step failed with timeout. Attempting Self-Healing for element: ${target} ...`);
+
+                        try {
+                            const htmlSnapshot = await page.content();
+                            const healedSelector = await genAIService.healSelector(htmlSnapshot, target, errorMessage);
+
+                            if (healedSelector) {
+                                log(`[Healer] ✨ AI found a potential new selector: ${healedSelector}`);
+
+                                // Retry with new selector
+                                if (step.command === 'click') {
+                                    await page.click(healedSelector);
+                                } else if (step.command === 'type') {
+                                    await page.fill(healedSelector, step.value);
+                                }
+
+                                log(`[Healer] ✅ Retry successful! Updating script...`);
+
+                                // Update the script object in memory
+                                script.steps[i].target = healedSelector;
+                                script.steps[i].targets = [[healedSelector, 'css:finder'], ...(script.steps[i].targets || [])];
+                                scriptWasHealed = true;
+
+                                if (this.io) {
+                                    this.io.emit('recorder:step:success', { index: i, healed: true, newSelector: healedSelector });
+                                }
+                                stepsCompleted++;
+                                continue; // Continue to next loop
+                            } else {
+                                log(`[Healer] ❌ AI could not find a fix.`);
+                            }
+                        } catch (healError) {
+                            log(`[Healer] Failed to heal: ${healError}`);
+                        }
+                    }
+                    // --- SELF HEALING LOGIC END ---
+
+                    if (this.io) {
+                        this.io.emit('recorder:step:error', { index: i, error: stepError.message });
+                    }
                     throw stepError;
                 }
             }
 
-            console.log('[Recorder] Script finished successfully');
+            log('[Recorder] Script finished successfully');
+
+            // --- VISUAL REGRESSION CHECK ---
+            log('[Visual] 📸 Capturing screenshot for Visual Check...');
+            const screenshotBuffer = await page.screenshot({ fullPage: true });
+            const visualResult = await visualTestService.compare(script.id, screenshotBuffer);
+
+            let finalStatus: 'pass' | 'fail' = 'pass';
+            if (visualResult.hasBaseline && visualResult.diffPercentage > 0) {
+                log(`[Visual] ⚠️ Mismatch detected: ${visualResult.diffPercentage.toFixed(2)}% difference.`);
+                logs.push(`[Visual] ⚠️ Mismatch detected: ${visualResult.diffPercentage.toFixed(2)}%`);
+                // Optionally mark as fail, or just 'visual_mismatch' if status supported
+                // For now, keeping as PASS but logging warning. 
+                // User can reject in UI.
+            } else if (!visualResult.hasBaseline) {
+                log(`[Visual] 🆕 First run. Saved as new Baseline.`);
+            } else {
+                log(`[Visual] ✅ Pixel Match! No changes.`);
+            }
+            // -------------------------------
+
             await browser.close();
+
+            // Persist healing if needed
+            if (scriptWasHealed) {
+                await this.updateScriptSteps(script.id, script.steps);
+                log('[Recorder] 💾 Script updated with healed selectors.');
+            }
 
             await this.reportService.addReport({
                 scriptId: script.id,
@@ -405,12 +502,14 @@ export class RecorderService {
                 duration: Date.now() - startTime,
                 stepsCompleted,
                 totalSteps: script.steps.length,
-                userId: script.userId
+                userId: script.userId,
+                logs: logs.join('\n')
             });
 
-            return { status: 'pass' };
-        } catch (err: any) {
-            console.error('[Recorder] Script failed:', err);
+            return { status: 'pass', logs: logs.join('\n') };
+
+        } catch (error: any) {
+            log(`[Recorder] Script failed: ${error.message}`);
             await browser.close();
 
             await this.reportService.addReport({
@@ -422,13 +521,14 @@ export class RecorderService {
                 startTime: new Date(startTime).toISOString(),
                 endTime: new Date().toISOString(),
                 duration: Date.now() - startTime,
-                error: err.message,
+                error: error.message,
                 stepsCompleted,
                 totalSteps: script.steps.length,
-                userId: script.userId
+                userId: script.userId,
+                logs: logs.join('\n')
             });
 
-            return { status: 'fail', error: err.message };
+            return { status: 'fail', logs: logs.join('\n') };
         }
     }
 

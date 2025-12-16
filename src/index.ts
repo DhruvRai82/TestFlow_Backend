@@ -15,6 +15,7 @@ import { recorderRoutes } from './routes/recorder';
 import { gitRoutes } from './routes/git';
 import { aiRouter } from './routes/ai';
 import { visualTestRouter } from './routes/visual-tests';
+import webhookRoutes from './routes/webhooks';
 import { recorderService } from './services/RecorderService';
 import { projectService } from './services/ProjectService';
 
@@ -82,7 +83,12 @@ app.use('/api/recorder', recorderRoutes);
 app.use('/api/git', gitRoutes);
 app.use('/api/ai', aiRouter);
 app.use('/api/visual', visualTestRouter);
+app.use('/api/webhooks', webhookRoutes); // Webhook Routes
+import testDataRoutes from './routes/test-data';
 app.use('/api/admin', adminRoutes); // New Admin Routes
+app.use('/api/test-data', testDataRoutes); // Data Driven Testing Routes
+import schedulesRoutes from './routes/schedules';
+app.use('/api/schedules', schedulesRoutes); // Scheduler Routes
 
 // Role Endpoint
 app.get('/api/user/role', (req, res) => {
@@ -132,6 +138,8 @@ app.get('/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date().toISOString() });
 });
 
+import { schedulerService } from './services/SchedulerService';
+
 io.on('connection', (socket) => {
   console.log('Client connected');
 
@@ -139,6 +147,9 @@ io.on('connection', (socket) => {
     console.log('Client disconnected');
   });
 });
+
+// Initialize Scheduler
+schedulerService.init().catch(err => console.error("Scheduler Init Failed:", err));
 
 server.listen(Number(PORT), '0.0.0.0', () => {
   console.log(`✅ Test Management Backend running on port ${PORT}`);
