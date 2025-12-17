@@ -1,7 +1,0 @@
-Starting AI Test...
-1. Generating Test Cases...
-Test Failed: Failed to generate test cases: [GoogleGenerativeAI Error]: Error fetching from https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent: [404 Not Found] models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.
-Stack: Error: Failed to generate test cases: [GoogleGenerativeAI Error]: Error fetching from https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent: [404 Not Found] models/gemini-1.5-flash is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.
-    at GenAIService.generateTestCases (F:\second\Bug-binder-add1\bug-binder\backend\src\services\GenAIService.ts:70:19)
-    at processTicksAndRejections (node:internal/process/task_queues:103:5)
-    at async test (F:\second\Bug-binder-add1\bug-binder\backend\scripts\test-ai.ts:24:23)

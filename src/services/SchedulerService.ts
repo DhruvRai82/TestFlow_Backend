@@ -1,4 +1,4 @@
-import cron from 'node-cron';
+import cron, { ScheduledTask } from 'node-cron';
 import { supabase } from '../lib/supabase';
 import { recorderService } from './RecorderService';
 
@@ -11,7 +11,7 @@ interface Schedule {
 }
 
 export class SchedulerService {
-    private tasks: Map<string, cron.ScheduledTask> = new Map();
+    private tasks: Map<string, ScheduledTask> = new Map();
 
     constructor() {
         // init called explicitly
