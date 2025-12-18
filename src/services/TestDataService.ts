@@ -1,106 +1,108 @@
-import fs from 'fs';
-import path from 'path';
-import { parse } from 'csv-parse/sync';
-
-const DATASETS_DIR = path.join(__dirname, '../../storage/datasets');
-
-if (!fs.existsSync(DATASETS_DIR)) {
-    fs.mkdirSync(DATASETS_DIR, { recursive: true });
-}
+import { supabase } from '../lib/supabase';
 
 export interface Dataset {
     id: string;
+    project_id: string;
     name: string;
-    type: 'csv' | 'json';
-    rowCount: number;
-    headers: string[];
-    createdAt: string;
+    data_type: 'csv' | 'json';
+    content: string;
+    created_at: string;
+    // Helper fields for UI (not in DB directly but derived)
+    rowCount?: number;
+    headers?: string[];
 }
 
 export class TestDataService {
 
     async listDatasets(): Promise<Dataset[]> {
-        const files = await fs.promises.readdir(DATASETS_DIR);
-        const datasets: Dataset[] = [];
+        const { data, error } = await supabase
+            .from('test_datasets')
+            .select('*')
+            .order('created_at', { ascending: false });
 
-        for (const file of files) {
-            try {
-                // We'll store metadata in a separate .meta.json file or just infer from file
-                // For simplicity, let's infer and maybe cache later.
-                // Actually, reading every file stats might be slow. 
-                // Let's assume filename format: {timestamp}_{name}.{ext}
-                // Or just use a simple map json. 
+        if (error) throw new Error(error.message);
 
-                // Better approach for MVP: Read file content on demand, list files simply.
-                const filePath = path.join(DATASETS_DIR, file);
-                const stats = await fs.promises.stat(filePath);
-
-                // Only process actual data files
-                if (file.endsWith('.csv') || file.endsWith('.json')) {
-                    const content = await fs.promises.readFile(filePath, 'utf8');
-                    let rowCount = 0;
-                    let headers: string[] = [];
-
-                    if (file.endsWith('.csv')) {
-                        const records = parse(content, { columns: true, skip_empty_lines: true }) as any[];
-                        rowCount = records.length;
-                        headers = records.length > 0 ? Object.keys(records[0]) : [];
-                    } else if (file.endsWith('.json')) {
-                        const json = JSON.parse(content);
-                        if (Array.isArray(json)) {
-                            rowCount = json.length;
-                            headers = json.length > 0 ? Object.keys(json[0]) : [];
-                        }
-                    }
-
-                    datasets.push({
-                        id: file,
-                        name: file,
-                        type: file.endsWith('.csv') ? 'csv' : 'json',
-                        rowCount,
-                        headers,
-                        createdAt: stats.birthtime.toISOString()
-                    });
-                }
-            } catch (e) {
-                console.error(`Error reading dataset ${file}:`, e);
-            }
-        }
-        return datasets.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+        return data.map(d => this.enrichMetadata(d));
     }
 
-    async saveDataset(name: string, content: string, type: 'csv' | 'json'): Promise<Dataset> {
-        // Sanitize name
-        const safeName = name.replace(/[^a-zA-Z0-9.\-_]/g, '_');
-        const filename = `${Date.now()}_${safeName}`;
-        const filePath = path.join(DATASETS_DIR, filename);
+    async saveDataset(name: string, content: string, type: 'csv' | 'json', projectId: string = 'default-project'): Promise<Dataset> {
+        // Basic validation
+        if (type === 'json') {
+            try { JSON.parse(content); } catch (e) { throw new Error("Invalid JSON content"); }
+        }
 
-        await fs.promises.writeFile(filePath, content);
+        const { data, error } = await supabase
+            .from('test_datasets')
+            .insert({
+                name,
+                content,
+                data_type: type,
+                project_id: projectId
+            })
+            .select()
+            .single();
 
-        // Return details
-        const savedStats = await this.listDatasets(); // Inefficient but simple
-        return savedStats.find(d => d.id === filename)!;
+        if (error) throw new Error(error.message);
+
+        return this.enrichMetadata(data);
     }
 
     async getData(id: string): Promise<any[]> {
-        const filePath = path.join(DATASETS_DIR, id);
-        if (!fs.existsSync(filePath)) throw new Error("Dataset not found");
+        const { data, error } = await supabase
+            .from('test_datasets')
+            .select('content, data_type')
+            .eq('id', id)
+            .single();
 
-        const content = await fs.promises.readFile(filePath, 'utf8');
+        if (error) throw new Error(error.message);
 
-        if (id.endsWith('.csv')) {
-            return parse(content, { columns: true, skip_empty_lines: true });
-        } else if (id.endsWith('.json')) {
-            return JSON.parse(content);
+        if (data.data_type === 'json') {
+            return JSON.parse(data.content);
+        } else {
+            // Lazy import csv-parse to avoid top-level dependency if possible, but standard import is fine
+            const { parse } = require('csv-parse/sync');
+            return parse(data.content, { columns: true, skip_empty_lines: true });
         }
-        return [];
     }
 
     async deleteDataset(id: string): Promise<void> {
-        const filePath = path.join(DATASETS_DIR, id);
-        if (fs.existsSync(filePath)) {
-            await fs.promises.unlink(filePath);
+        const { error } = await supabase
+            .from('test_datasets')
+            .delete()
+            .eq('id', id);
+
+        if (error) throw new Error(error.message);
+    }
+
+    // Helper to add row count/headers for UI preview without saving them to DB redundant
+    private enrichMetadata(dataset: any): Dataset {
+        let rowCount = 0;
+        let headers: string[] = [];
+
+        try {
+            if (dataset.data_type === 'json') {
+                const json = JSON.parse(dataset.content);
+                if (Array.isArray(json)) {
+                    rowCount = json.length;
+                    headers = json.length > 0 ? Object.keys(json[0]) : [];
+                }
+            } else {
+                // Simple estimation for CSV to avoid full parsing on list
+                const lines = dataset.content.split('\n').filter((l: string) => l.trim().length > 0);
+                rowCount = Math.max(0, lines.length - 1);
+                headers = lines.length > 0 ? lines[0].split(',') : [];
+            }
+        } catch (e) {
+            console.warn(`Failed to parse metadata for dataset ${dataset.id}`);
         }
+
+        return {
+            ...dataset,
+            rowCount,
+            headers,
+            // Don't send full content in list view if it's huge? 
+            // For now, we are sending it. If huge, we should strip it in 'listDatasets' select.
+        };
     }
 }
 

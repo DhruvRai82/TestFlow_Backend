@@ -5,8 +5,42 @@ import fs from 'fs';
 
 const router = Router();
 
+
+// Create Test
+router.post('/', async (req, res) => {
+    try {
+        const { name, targetUrl, projectId } = req.body;
+        const test = await visualTestService.createTest(name, targetUrl, projectId);
+        res.json(test);
+    } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+    }
+});
+
+// List Tests
+router.get('/', async (req, res) => {
+    try {
+        const tests = await visualTestService.getTests();
+        res.json(tests);
+    } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+    }
+});
+
+// Run Test
+router.post('/:testId/run', async (req, res) => {
+    try {
+        const result = await visualTestService.runTest(req.params.testId);
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+    }
+});
+
 // Get Status (Diff %)
 router.get('/:scriptId/status', async (req, res) => {
+    // ... existing code
+
     try {
         // This is a bit tricky, usually status is result of a run. 
         // For now, checks if diff exists.
@@ -36,7 +70,17 @@ router.get('/:scriptId/:type', async (req, res) => {
         if (fs.existsSync(imagePath)) {
             res.sendFile(imagePath);
         } else {
-            res.status(404).json({ error: 'Image not found' });
+            // Return transparent 1x1 pixel instead of 404 to avoid console errors
+            // especially for 'diff' which is expected to be missing on pass
+            const transparentPixelInfo = Buffer.from(
+                'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=',
+                'base64'
+            );
+            res.writeHead(200, {
+                'Content-Type': 'image/png',
+                'Content-Length': transparentPixelInfo.length
+            });
+            res.end(transparentPixelInfo);
         }
     } catch (error) {
         res.status(500).json({ error: (error as Error).message });
