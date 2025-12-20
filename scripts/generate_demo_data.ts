@@ -25,7 +25,7 @@ async function generateData() {
     });
 
     if (!projectRes.ok) throw new Error(`Failed to create project: ${projectRes.statusText}`);
-    const project = await projectRes.json();
+    const project = await projectRes.json() as any;
     console.log(`✅ Project Created! ID: ${project.id}`);
 
     // 2. Upload Test Data (Multipart)
@@ -47,7 +47,7 @@ async function generateData() {
     });
 
     if (!uploadRes.ok) throw new Error(`Failed to upload data: ${uploadRes.statusText}`);
-    const dataset = await uploadRes.json();
+    const dataset = await uploadRes.json() as any;
     console.log(`✅ Dataset Uploaded! ID: ${dataset.id}`);
 
 
@@ -75,7 +75,7 @@ async function generateData() {
     // Note: If this route fails (maybe not fully implemented in scripts.ts), we might skip scheduling
     let scriptId = null;
     if (scriptRes.ok) {
-        const script = await scriptRes.json();
+        const script = await scriptRes.json() as any;
         scriptId = script.id;
         console.log(`✅ Script Created! ID: ${script.id}`);
     } else {
@@ -95,7 +95,7 @@ async function generateData() {
         });
 
         if (scheduleRes.ok) {
-            const schedule = await scheduleRes.json();
+            const schedule = await scheduleRes.json() as any;
             console.log(`✅ Schedule Created! ID: ${schedule.id}`);
         } else {
             console.error('❌ Failed to schedule.');

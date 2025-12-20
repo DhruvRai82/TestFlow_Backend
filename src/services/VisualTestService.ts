@@ -59,7 +59,11 @@ export class VisualTestService {
             .eq('id', testId)
             .single();
 
-        if (error || !testData) throw new Error("Visual Test not found");
+        if (error || !testData) {
+            console.error('[VisualTest] DB Error:', error);
+            throw new Error("Visual Test not found");
+        }
+        console.log(`[VisualTest] Starting test for: ${testData.name} (${testData.target_url})`);
 
         // 2. Launch Browser
         const browser = await chromium.launch({
@@ -73,7 +77,12 @@ export class VisualTestService {
 
             // 3. Navigate
             console.log(`[VisualTest] Visiting ${testData.target_url}`);
-            await page.goto(testData.target_url, { waitUntil: 'networkidle' });
+            try {
+                await page.goto(testData.target_url, { waitUntil: 'load', timeout: 30000 });
+            } catch (navError: any) {
+                console.error('[VisualTest] Navigation failed:', navError.message);
+                throw navError;
+            }
 
             // Optional: wait for a bit
             await page.waitForTimeout(1000);
@@ -173,6 +182,29 @@ export class VisualTestService {
 
         } else {
             throw new Error("No latest run to approve");
+        }
+    }
+
+    async deleteTest(testId: string): Promise<void> {
+        // 1. Delete from DB
+        const { error } = await supabase
+            .from('visual_tests')
+            .delete()
+            .eq('id', testId);
+
+        if (error) throw new Error(error.message);
+
+        // 2. Delete Clean Artifacts (Baselines, Latest, Diff)
+        const paths = [
+            this.getPath(testId, 'baseline'),
+            this.getPath(testId, 'latest'),
+            this.getPath(testId, 'diff')
+        ];
+
+        for (const p of paths) {
+            if (fs.existsSync(p)) {
+                await fs.promises.unlink(p).catch(console.error);
+            }
         }
     }
 }

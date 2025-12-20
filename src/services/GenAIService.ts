@@ -2,6 +2,8 @@ import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from '@google/ge
 import dotenv from 'dotenv';
 import path from 'path';
 import * as fs from 'fs';
+import { supabase } from '../lib/supabase';
+import OpenAI from 'openai';
 
 // Load env from backend root
 dotenv.config({ path: path.join(__dirname, '../../.env') });
@@ -41,6 +43,8 @@ const logResponseToFile = (message: string, content: string) => {
 interface AIConfig {
     apiKey?: string;
     model?: string;
+    provider?: 'google' | 'openai';
+    baseUrl?: string;
 }
 
 export class GenAIService {
@@ -75,36 +79,103 @@ export class GenAIService {
         ];
     }
 
-    // Helper to get the correct model instance (Default or Custom)
-    private getModelInstance(config?: AIConfig) {
-        if (config?.apiKey) {
-            console.log(`[GenAIService] ⚡ Using CUSTOM API KEY provided by user.`);
-            const customGenAI = new GoogleGenerativeAI(config.apiKey);
-            const modelName = config.model || "gemini-1.5-flash"; // Default manual override
-            console.log(`[GenAIService] ⚡ Using CUSTOM MODEL: ${modelName}`);
-
-            return customGenAI.getGenerativeModel({
-                model: modelName,
-                safetySettings: this.getSafetySettings()
-            });
+    // Helper to get active configuration (Default or Custom from DB)
+    private async getActiveConfig(userId?: string): Promise<AIConfig> {
+        if (!userId) {
+            console.log(`[GenAIService] No UserID provided, using system default (Google).`);
+            return { provider: 'google' };
         }
 
-        // Fallback to default
-        if (config?.model) {
-            console.log(`[GenAIService] ⚡ Using Default Key but CUSTOM MODEL: ${config.model}`);
-            return this.defaultGenAI.getGenerativeModel({
-                model: config.model,
-                safetySettings: this.getSafetySettings()
-            });
+        // Validate if userId is a valid UUID to prevent Postgres crashing
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+        if (!uuidRegex.test(userId)) {
+            console.warn(`[GenAIService] UserID "${userId}" is not a valid UUID. Skipping Custom Key DB lookup and using system default.`);
+            return { provider: 'google' };
         }
 
-        return this.defaultModel;
+        try {
+            // Fetch active key for user
+            const { data: keyData, error } = await supabase
+                .from('user_ai_keys')
+                .select('*')
+                .eq('user_id', userId)
+                .eq('is_active', true)
+                .single();
+
+            if (keyData && keyData.api_key) {
+                console.log(`[GenAIService] ⚡ Using CUSTOM API KEY for user ${userId} (${keyData.name}) - Provider: ${keyData.provider || 'google'}`);
+                return {
+                    apiKey: keyData.api_key,
+                    model: keyData.model || (keyData.provider === 'openai' ? 'gpt-4o' : 'gemini-1.5-flash'),
+                    provider: keyData.provider || 'google', // Default to google for backward compatibility
+                    baseUrl: keyData.base_url
+                };
+            }
+        } catch (e) {
+            console.warn(`[GenAIService] Failed to fetch custom key for user ${userId}, falling back to default. Error:`, e);
+        }
+
+        console.log(`[GenAIService] Using System Default for user ${userId}`);
+        return { provider: 'google' };
     }
 
-    async generateTestCases(requirements: string, config?: AIConfig): Promise<string> {
-        const model = this.getModelInstance(config);
+    // Unified Generation Method (Strategy Pattern)
+    private async generateContentUnified(prompt: string, userId?: string): Promise<string> {
+        const config = await this.getActiveConfig(userId);
 
-        const prompt = `
+        if (config.provider === 'openai') {
+            return this.generateOpenAI(config, prompt);
+        } else {
+            return this.generateGoogle(config, prompt);
+        }
+    }
+
+    // Google Implementation
+    private async generateGoogle(config: AIConfig, prompt: string): Promise<string> {
+        try {
+            let model;
+            if (config.apiKey) {
+                const genAI = new GoogleGenerativeAI(config.apiKey);
+                model = genAI.getGenerativeModel({
+                    model: config.model || "gemini-1.5-flash",
+                    safetySettings: this.getSafetySettings()
+                });
+            } else {
+                model = this.defaultModel;
+            }
+
+            const result = await model.generateContent(prompt);
+            const response = await result.response;
+            return response.text();
+        } catch (error) {
+            logErrorToFile("Google Geneation Failed", error);
+            throw error;
+        }
+    }
+
+    // OpenAI Implementation
+    private async generateOpenAI(config: AIConfig, prompt: string): Promise<string> {
+        try {
+            const openai = new OpenAI({
+                apiKey: config.apiKey,
+                baseURL: config.baseUrl || undefined // Optional base url
+            });
+
+            const completion = await openai.chat.completions.create({
+                messages: [{ role: "user", content: prompt }],
+                model: config.model || "gpt-4o",
+            });
+
+            return completion.choices[0].message.content || "";
+        } catch (error) {
+            logErrorToFile("OpenAI Generation Failed", error);
+            throw error;
+        }
+    }
+
+
+    async generateTestCases(requirements: string, userId?: string): Promise<string> {
+        return this.generateContentUnified(`
         Act as a QA Engineer. Based on the following requirements, generate a list of structured test cases.
         For each test case, provide:
         - Test Scenario
@@ -116,22 +187,10 @@ export class GenAIService {
         "${requirements}"
 
         Format the output as a Markdown list.
-        `;
-
-        try {
-            const result = await model.generateContent(prompt);
-            const response = await result.response;
-            return response.text();
-        } catch (error) {
-            logErrorToFile("generateTestCases Failed", error);
-            console.error("Error generating test cases:", error);
-            throw new Error(`Failed to generate test cases: ${(error as Error).message}`);
-        }
+        `, userId);
     }
 
-    async summarizeBug(description: string, config?: AIConfig): Promise<any> {
-        const model = this.getModelInstance(config);
-
+    async summarizeBug(description: string, userId?: string): Promise<any> {
         const prompt = `
         Act as a QA Lead. Analyze the following verbose bug description/logs and generate a structured Bug Report.
         
@@ -150,26 +209,18 @@ export class GenAIService {
         }
         `;
 
+        const text = await this.generateContentUnified(prompt, userId);
         try {
-            const result = await model.generateContent(prompt);
-            const response = await result.response;
-            const text = response.text();
-
             const jsonMatch = text.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-                return JSON.parse(jsonMatch[0]);
-            }
+            if (jsonMatch) return JSON.parse(jsonMatch[0]);
             return JSON.parse(text);
-        } catch (error) {
-            logErrorToFile("summarizeBug Failed", error);
-            console.error("Error summarizing bug:", error);
-            throw new Error(`Failed to summarize bug: ${(error as Error).message}`);
+        } catch (e) {
+            console.error("Failed to parse JSON from AI response", text);
+            throw new Error("Invalid JSON response from AI");
         }
     }
 
-    async generateStructuredTestCase(prompt: string, config?: AIConfig): Promise<any> {
-        const model = this.getModelInstance(config);
-
+    async generateStructuredTestCase(prompt: string, userId?: string): Promise<any> {
         const systemPrompt = `
         Act as a Senior QA Automation Engineer.
         Your task is to generate a comprehensive SINGLE Test Case based on the user's description.
@@ -197,29 +248,21 @@ export class GenAIService {
         User Prompt: "${prompt}"
         `;
 
+        const text = await this.generateContentUnified(systemPrompt, userId);
         try {
-            const result = await model.generateContent(systemPrompt);
-            const response = await result.response;
-            const text = response.text();
-
             const jsonStart = text.indexOf('{');
             const jsonEnd = text.lastIndexOf('}');
             if (jsonStart !== -1 && jsonEnd !== -1) {
-                const jsonStr = text.substring(jsonStart, jsonEnd + 1);
-                return JSON.parse(jsonStr);
+                return JSON.parse(text.substring(jsonStart, jsonEnd + 1));
             }
             return JSON.parse(text);
-
-        } catch (error) {
-            logErrorToFile("generateStructuredTestCase Failed", error);
-            console.error("Error generating structured test case:", error);
-            throw new Error(`Failed to generate test case: ${(error as Error).message}`);
+        } catch (e) {
+            console.error("Failed to parse JSON from AI response", text);
+            throw new Error("Invalid JSON response from AI");
         }
     }
 
-    async generateBulkTestCases(prompt: string, config?: AIConfig): Promise<any[]> {
-        const model = this.getModelInstance(config);
-
+    async generateBulkTestCases(prompt: string, userId?: string): Promise<any[]> {
         console.log("--> BACKEND: GenAIService generating BULK test cases, prompt len:", prompt.length);
 
         const systemPrompt = `
@@ -249,23 +292,19 @@ export class GenAIService {
         User Flow Description: "${prompt}"
         `;
 
+        const text = await this.generateContentUnified(systemPrompt, userId);
+        console.log("--> BACKEND: AI Response Length:", text.length);
+        logResponseToFile("generateBulkTestCases Response", text);
+
         try {
-            const result = await model.generateContent(systemPrompt);
-            const response = await result.response;
-            const text = response.text();
-
-            console.log("--> BACKEND: AI Response Length:", text.length);
-            logResponseToFile("generateBulkTestCases Response", text);
-
+            // Heuristic: OpenAI sometimes returns simple content, sometimes markdown. 
+            // We need to find the array brackets.
             const jsonStart = text.indexOf('[');
             const jsonEnd = text.lastIndexOf(']');
             if (jsonStart !== -1 && jsonEnd !== -1) {
-                const jsonStr = text.substring(jsonStart, jsonEnd + 1);
-                return JSON.parse(jsonStr);
+                return JSON.parse(text.substring(jsonStart, jsonEnd + 1));
             }
-
             return JSON.parse(text);
-
         } catch (error) {
             logErrorToFile("generateBulkTestCases Failed", error);
             console.error("Error generating bulk test cases:", error);
@@ -273,9 +312,7 @@ export class GenAIService {
         }
     }
 
-    async healSelector(htmlSnippet: string, oldSelector: string, errorMsg: string, config?: AIConfig): Promise<string | null> {
-        const model = this.getModelInstance(config);
-
+    async healSelector(htmlSnippet: string, oldSelector: string, errorMsg: string, userId?: string): Promise<string | null> {
         const prompt = `
         Act as a Test Automation Expert (Playwright).
         A test failed because the element with selector "${oldSelector}" was not found.
@@ -298,13 +335,8 @@ export class GenAIService {
         `;
 
         try {
-            const result = await model.generateContent(prompt);
-            const response = await result.response;
-            const text = response.text().trim();
-
+            const text = (await this.generateContentUnified(prompt, userId)).trim();
             if (text.toLowerCase() === 'null') return null;
-
-            // Cleanup if AI returns quotes or backticks
             return text.replace(/`/g, '').replace(/"/g, '').replace(/'/g, '');
         } catch (error) {
             logErrorToFile("healSelector Failed", error);

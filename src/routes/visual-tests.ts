@@ -40,6 +40,16 @@ router.post('/:testId/run', async (req, res) => {
     }
 });
 
+// Delete Test
+router.delete('/:testId', async (req, res) => {
+    try {
+        await visualTestService.deleteTest(req.params.testId);
+        res.json({ status: 'deleted' });
+    } catch (error) {
+        res.status(500).json({ error: (error as Error).message });
+    }
+});
+
 // Get Status (Diff %)
 router.get('/:scriptId/status', async (req, res) => {
     // ... existing code
