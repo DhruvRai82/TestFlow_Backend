@@ -43,7 +43,7 @@ const logResponseToFile = (message: string, content: string) => {
 interface AIConfig {
     apiKey?: string;
     model?: string;
-    provider?: 'google' | 'openai';
+    provider?: 'google' | 'openai' | 'groq' | 'custom';
     baseUrl?: string;
 }
 
@@ -79,51 +79,75 @@ export class GenAIService {
         ];
     }
 
+    // Helper to write to log file for debugging
+    private logDebug(message: string) {
+        const logPath = path.join(__dirname, '../../ai_debug.log');
+        const timestamp = new Date().toISOString();
+        const logEntry = `\n[${timestamp}] [DEBUG] ${message}\n`;
+        try {
+            fs.appendFileSync(logPath, logEntry);
+        } catch (e) {
+            console.error("Failed to write to log file:", e);
+        }
+    }
+
     // Helper to get active configuration (Default or Custom from DB)
     private async getActiveConfig(userId?: string): Promise<AIConfig> {
-        if (!userId) {
-            console.log(`[GenAIService] No UserID provided, using system default (Google).`);
-            return { provider: 'google' };
-        }
+        this.logDebug(`getActiveConfig called for userId: '${userId}'`);
 
-        // Validate if userId is a valid UUID to prevent Postgres crashing
-        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-        if (!uuidRegex.test(userId)) {
-            console.warn(`[GenAIService] UserID "${userId}" is not a valid UUID. Skipping Custom Key DB lookup and using system default.`);
+        if (!userId) {
+            this.logDebug(`No UserID provided, using system default (Google).`);
             return { provider: 'google' };
         }
 
         try {
             // Fetch active key for user
-            const { data: keyData, error } = await supabase
+            // NOTE: user_id is now TEXT in DB, so no UUID validation needed.
+            const query = supabase
                 .from('user_ai_keys')
                 .select('*')
                 .eq('user_id', userId)
-                .eq('is_active', true)
-                .single();
+                .eq('is_active', true);
+
+            const { data, error } = await query.limit(1);
+            const keyData = data?.[0];
+
+            if (error) {
+                this.logDebug(`DB Error fetching key for ${userId}: ${JSON.stringify(error)}`);
+            }
 
             if (keyData && keyData.api_key) {
-                console.log(`[GenAIService] ⚡ Using CUSTOM API KEY for user ${userId} (${keyData.name}) - Provider: ${keyData.provider || 'google'}`);
+                this.logDebug(`⚡ Using CUSTOM API KEY for user ${userId} (${keyData.name}) - Provider: ${keyData.provider || 'google'}`);
                 return {
                     apiKey: keyData.api_key,
-                    model: keyData.model || (keyData.provider === 'openai' ? 'gpt-4o' : 'gemini-1.5-flash'),
-                    provider: keyData.provider || 'google', // Default to google for backward compatibility
+                    model: keyData.model || this.getDefaultModelForProvider(keyData.provider),
+                    provider: keyData.provider || 'google',
                     baseUrl: keyData.base_url
                 };
+            } else {
+                this.logDebug(`No active key found for user ${userId}. keyData: ${JSON.stringify(keyData)}`);
             }
         } catch (e) {
-            console.warn(`[GenAIService] Failed to fetch custom key for user ${userId}, falling back to default. Error:`, e);
+            this.logDebug(`Exception in getActiveConfig: ${JSON.stringify(e)}`);
         }
 
-        console.log(`[GenAIService] Using System Default for user ${userId}`);
+        this.logDebug(`Using System Default for user ${userId} (Fallback)`);
         return { provider: 'google' };
+    }
+
+    private getDefaultModelForProvider(provider?: string): string {
+        switch (provider) {
+            case 'openai': return 'gpt-4o';
+            case 'groq': return 'llama3-70b-8192';
+            default: return 'gemini-1.5-flash';
+        }
     }
 
     // Unified Generation Method (Strategy Pattern)
     private async generateContentUnified(prompt: string, userId?: string): Promise<string> {
         const config = await this.getActiveConfig(userId);
 
-        if (config.provider === 'openai') {
+        if (config.provider === 'openai' || config.provider === 'groq' || config.provider === 'custom') {
             return this.generateOpenAI(config, prompt);
         } else {
             return this.generateGoogle(config, prompt);
@@ -148,27 +172,37 @@ export class GenAIService {
             const response = await result.response;
             return response.text();
         } catch (error) {
-            logErrorToFile("Google Geneation Failed", error);
+            logErrorToFile("Google Generation Failed", error);
             throw error;
         }
     }
 
-    // OpenAI Implementation
+    // OpenAI/Groq Implementation
     private async generateOpenAI(config: AIConfig, prompt: string): Promise<string> {
         try {
+            let baseURL = config.baseUrl;
+
+            // Auto-configure Groq URL if not set
+            if (!baseURL && config.provider === 'groq') {
+                baseURL = 'https://api.groq.com/openai/v1';
+            }
+
             const openai = new OpenAI({
                 apiKey: config.apiKey,
-                baseURL: config.baseUrl || undefined // Optional base url
+                baseURL: baseURL || undefined
             });
+
+            console.log(`[GenAIService] Calling OpenAI Compatible API. Provider: ${config.provider}, Model: ${config.model}, URL: ${baseURL || 'default'}`);
 
             const completion = await openai.chat.completions.create({
                 messages: [{ role: "user", content: prompt }],
-                model: config.model || "gpt-4o",
+                model: config.model || (config.provider === 'groq' ? 'llama3-70b-8192' : "gpt-4o"),
             });
 
             return completion.choices[0].message.content || "";
         } catch (error) {
-            logErrorToFile("OpenAI Generation Failed", error);
+            logErrorToFile(`${config.provider} Generation Failed`, error);
+            console.error("OpenAI/Groq Error:", error);
             throw error;
         }
     }
@@ -347,3 +381,4 @@ export class GenAIService {
 }
 
 export const genAIService = new GenAIService();
+

@@ -32,7 +32,7 @@ export const settingsService = {
         }));
     },
 
-    async addAIKey(userId: string, keyData: { name: string, apiKey: string, model: string }): Promise<UserAIKey> {
+    async addAIKey(userId: string, keyData: { name: string, apiKey: string, model: string, provider?: string, baseUrl?: string }): Promise<UserAIKey> {
         // If this is the first key, make it active by default
         const { count } = await supabase
             .from('user_ai_keys')
@@ -48,7 +48,8 @@ export const settingsService = {
                 name: keyData.name,
                 api_key: keyData.apiKey,
                 model: keyData.model,
-                provider: 'gemini',
+                provider: keyData.provider || 'google',
+                base_url: keyData.baseUrl,
                 is_active: isActive
             })
             .select()

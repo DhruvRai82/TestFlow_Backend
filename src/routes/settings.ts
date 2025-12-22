@@ -23,16 +23,16 @@ router.post('/keys', async (req, res) => {
         const userId = (req as any).user?.uid;
         if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-        const { name, apiKey, model } = req.body;
+        const { name, apiKey, model, provider, baseUrl } = req.body;
         if (!name || !apiKey || !model) {
             return res.status(400).json({ error: 'Missing required fields' });
         }
 
-        const newKey = await settingsService.addAIKey(userId, { name, apiKey, model });
+        const newKey = await settingsService.addAIKey(userId, { name, apiKey, model, provider, baseUrl });
         res.status(201).json(newKey);
     } catch (error) {
         console.error('Error adding AI key:', error);
-        res.status(500).json({ error: 'Failed to add key' });
+        res.status(500).json({ error: 'Failed to add key', details: (error as any).message || JSON.stringify(error) });
     }
 });
 

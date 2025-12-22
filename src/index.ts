@@ -20,6 +20,7 @@ import { gitRoutes } from './routes/git';
 import { apiLabRouter } from './routes/api-lab';
 import { runnerRoutes } from './routes/runner';
 import { settingsRoutes } from './routes/settings';
+import { aiRouter } from './routes/ai';
 
 dotenv.config();
 
@@ -65,6 +66,7 @@ app.use('/api/git', gitRoutes);
 app.use('/api/runner', runnerRoutes);
 app.use('/api/lab', apiLabRouter);
 app.use('/api/settings', settingsRoutes);
+app.use('/api/ai', aiRouter);
 
 // Initialize Scheduler
 schedulerService.init().catch(err => console.error("Scheduler Init Failed:", err));
