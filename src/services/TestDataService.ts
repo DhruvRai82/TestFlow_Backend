@@ -17,12 +17,14 @@ export class TestDataService {
     async listDatasets(projectId: string): Promise<Dataset[]> {
         const { data, error } = await supabase
             .from('test_datasets')
-            .select('*')
+            // Don't fetch 'content' to avoid OOM crash on list view
+            .select('id, project_id, name, data_type, created_at')
             .eq('project_id', projectId) // Filter by project
             .order('created_at', { ascending: false });
 
         if (error) throw new Error(error.message);
 
+        // Enrichment will use empty row counts since content is missing
         return data.map(d => this.enrichMetadata(d));
     }
 
@@ -81,6 +83,15 @@ export class TestDataService {
         let headers: string[] = [];
 
         try {
+            if (!dataset.content) {
+                // Content not valid or not fetched
+                return {
+                    ...dataset,
+                    rowCount: 0,
+                    headers: []
+                };
+            }
+
             if (dataset.data_type === 'json') {
                 const json = JSON.parse(dataset.content);
                 if (Array.isArray(json)) {
