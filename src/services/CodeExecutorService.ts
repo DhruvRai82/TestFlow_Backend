@@ -24,36 +24,37 @@ export class CodeExecutorService {
         let fileName = `${runId}.txt`;
         let command = '';
         let args: string[] = [];
+        let env = { ...process.env }; // Inherit env (PATH, DISPLAY, etc.)
 
         // 1. Prepare File & Command
         switch (language) {
             case 'typescript':
-                fileName = `${runId}.ts`;
+            case 'javascript':
+                fileName = `${runId}.ts`; // Run everything as TS/JS via tsx for simplicity
+                // Using 'npx tsx' allows it to find local node_modules easily
                 command = 'npx';
-                // Use tsx for better compatibility/speed
                 args = ['tsx', path.join(this.tempDir, fileName)];
                 break;
             case 'python':
                 fileName = `${runId}.py`;
-                // Try python3, fallback to python might be needed in some envs
-                command = 'python';
+
+                // Check for local venv "python_env" in backend root
+                const venvPath = path.join(process.cwd(), 'python_env', 'Scripts', 'python.exe');
+                if (fs.existsSync(venvPath)) {
+                    command = venvPath;
+                } else {
+                    command = 'python'; // Fallback to system python
+                }
+
                 args = [path.join(this.tempDir, fileName)];
                 break;
             case 'java':
-                // Java is tricky because class name must match filename.
-                // We'll rename the class in code or use "Main"? 
-                // Let's assume user writes a class inside? 
-                // For simplicity, we save as Main.java and compile.
-                // But concurrency issues if multiple runs.
-                // For v1, let's skip Java or treat as "Single File Execution"
+                // Basic Java Support (Single File)
                 fileName = `Main_${runId.replace(/-/g, '')}.java`;
-                const className = fileName.replace('.java', '');
-
-                // Hack: Replace "public class X" with "public class Main_uuid" ??
-                // Or just tell user "Please name your class Main"?
-                // Let's try to just run it via `java` (single file source code program in Java 11+)
-                // `java Main.java` works in modern Java.
                 command = 'java';
+                // Note: Java requires valid class name matching filename. 
+                // We rely on user or we might need a wrapper.
+                // Assuming JDK 11+ single-file execution:
                 args = [path.join(this.tempDir, fileName)];
                 break;
             default:
@@ -63,8 +64,6 @@ export class CodeExecutorService {
         const filePath = path.join(this.tempDir, fileName);
 
         // 2. Write File
-        // For java, we might need to patch the class name if we want to be smart, 
-        // but for now let's trust the user or rely on java 11 single-file mode.
         fs.writeFileSync(filePath, content);
 
         // 3. Execute
@@ -72,23 +71,28 @@ export class CodeExecutorService {
             const logs: string[] = [];
 
             // Spawn Process
-            // Shell: true helps with path resolution (e.g. npx)
-            const process = spawn(command, args, { shell: true });
+            const process = spawn(command, args, {
+                shell: true,
+                env, // Pass environment (Critical for Browsers!)
+            });
 
             process.stdout.on('data', (data) => {
                 logs.push(data.toString());
             });
 
             process.stderr.on('data', (data) => {
-                logs.push(`[Error] ${data.toString()}`);
+                // Some tools (Playwright) print info to stderr, distinguishing isn't always "Error"
+                // But for now we log it.
+                logs.push(`[Details] ${data.toString()}`);
             });
 
             process.on('close', (code) => {
                 // Cleanup
                 try {
+                    // Delay cleanup slightly in case of file locks? No, standard unlink should be fine.
                     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
                 } catch (e) {
-                    console.error('Cleanup error', e);
+                    // ignore
                 }
 
                 resolve({
@@ -98,12 +102,20 @@ export class CodeExecutorService {
                 });
             });
 
-            // Timeout safety (10 seconds)
-            setTimeout(() => {
-                process.kill();
-                logs.push('\n[System] Execution timed out (10s limit).');
+            // Timeout safety (120 seconds for automation)
+            const timeoutMs = 120000;
+            const timeoutId = setTimeout(() => {
+                try {
+                    process.kill();
+                    logs.push(`\n[System] Execution timed out (${timeoutMs / 1000}s limit).`);
+                } catch (e) {
+                    // process might be gone
+                }
                 resolve({ runId, logs, exitCode: -1 });
-            }, 10000);
+            }, timeoutMs);
+
+            // Clear timeout if finished
+            process.on('exit', () => clearTimeout(timeoutId));
         });
     }
 }
