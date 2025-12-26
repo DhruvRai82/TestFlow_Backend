@@ -1,0 +1,12 @@
+[
+  {
+    "id": "a251e8bb-1bbe-474f-8e2c-79245bd9fee2",
+    "projectId": "e8477172-087a-4d72-a309-60871b372ddd",
+    "name": "Google home",
+    "target_url": "https://www.google.com/",
+    "createdAt": "2025-12-25T07:10:47.803Z",
+    "status": "new",
+    "lastRun": "2025-12-25T07:11:13.851Z",
+    "diffPercentage": 0
+  }
+]

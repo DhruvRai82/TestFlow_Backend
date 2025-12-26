@@ -378,6 +378,80 @@ export class GenAIService {
             return null;
         }
     }
+
+    async analyzeRunFailure(runId: string, userId?: string): Promise<any> {
+        console.log(`[GenAIService] Analyzing failure for Run ID: ${runId}`);
+
+        try {
+            // 1. Fetch Run Details
+            const { data: run, error: runError } = await supabase
+                .from('test_runs')
+                .select('*, recorded_scripts(*)')
+                .eq('id', runId)
+                .single();
+
+            if (runError || !run) throw new Error(`Run not found: ${runError?.message}`);
+
+            // 2. Fetch Logs (Last 15 steps)
+            const { data: logs, error: logError } = await supabase
+                .from('test_logs')
+                .select('*')
+                .eq('run_id', runId)
+                .order('step_index', { ascending: true }); // Get all to reconstruct flow
+
+            if (logError) throw new Error(`Logs not found: ${logError.message}`);
+
+            // 3. Construct Context
+            const scriptCode = JSON.stringify(run.recorded_scripts?.steps || []);
+            const errorMsg = run.error_message || "Unknown Error";
+
+            // Filter relevant logs (failures and last few steps)
+            const relevantLogs = logs?.slice(-10).map((l: any) => `[${l.status.toUpperCase()}] Step ${l.step_index} (${l.action}): ${l.message}`).join('\n');
+
+            const prompt = `
+            Act as a Senior Test Automation Engineer. 
+            A Playwright test run has FAILED. Your job is to analyze the logs and error message to explain WHY it failed and HOW to fix it.
+
+            --- CONTEXT ---
+            Error Message: "${errorMsg}"
+            
+            Recent Execution Logs:
+            ${relevantLogs}
+
+            Script Steps (JSON):
+            ${scriptCode.substring(0, 5000)}
+            ---------------
+
+            OUTPUT FORMAT (JSON ONLY):
+            {
+                "failureReason": "A concise, non-technical explanation of what went wrong (1-2 sentences).",
+                "technicalRootCause": "Detailed technical explanation (e.g. Selector '.btn-submit' not found in DOM).",
+                "suggestedFix": "Step-by-step instructions to fix the script or application.",
+                "confidenceScore": 0.95
+            }
+            `;
+
+            const text = await this.generateContentUnified(prompt, userId);
+
+            try {
+                const jsonMatch = text.match(/\{[\s\S]*\}/);
+                if (jsonMatch) return JSON.parse(jsonMatch[0]);
+                return JSON.parse(text);
+            } catch (e) {
+                console.error("Failed to parse AI Analysis JSON", text);
+                return {
+                    failureReason: "AI Analysis Failed",
+                    technicalRootCause: "Could not parse AI response",
+                    suggestedFix: "Check raw logs manually.",
+                    confidenceScore: 0
+                };
+            }
+
+        } catch (error: any) {
+            console.error("analyzeRunFailure Error:", error);
+            throw new Error(`Analysis failed: ${error.message}`);
+        }
+    }
 }
 
 export const genAIService = new GenAIService();

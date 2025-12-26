@@ -1,211 +1,201 @@
 import fs from 'fs';
 import path from 'path';
+import { chromium } from 'playwright';
 import { PNG } from 'pngjs';
 import pixelmatch from 'pixelmatch';
-import { supabase } from '../lib/supabase';
-import { chromium } from 'playwright';
+import { v4 as uuidv4 } from 'uuid';
 
-// Keeping file storage for images is good practice (DB is not for large blobs ideally)
-const STORAGE_DIR = path.join(__dirname, '../../storage');
-const BASELINE_DIR = path.join(STORAGE_DIR, 'baselines');
-const LATEST_DIR = path.join(STORAGE_DIR, 'latest');
-const DIFF_DIR = path.join(STORAGE_DIR, 'diffs');
+const DATA_DIR = path.join(__dirname, '../../data');
+const IMAGES_DIR = path.join(DATA_DIR, 'visual_images');
+const METADATA_FILE = path.join(DATA_DIR, 'visual_tests.json');
 
 // Ensure directories exist
-[BASELINE_DIR, LATEST_DIR, DIFF_DIR].forEach(dir => {
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
-    }
-});
+if (!fs.existsSync(IMAGES_DIR)) fs.mkdirSync(IMAGES_DIR, { recursive: true });
+if (!fs.existsSync(METADATA_FILE)) fs.writeFileSync(METADATA_FILE, JSON.stringify([]));
 
-interface VisualMismatch {
-    scriptId: string; // This corresponds to visual_test_id in DB
-    diffPercentage: number;
-    hasBaseline: boolean;
+export interface VisualTest {
+    id: string;
+    projectId: string;
+    name: string;
+    target_url: string;
+    createdAt: string;
+    lastRun?: string;
+    diffPercentage?: number;
+    status: 'pass' | 'fail' | 'new';
 }
 
 export class VisualTestService {
 
-    private getPath(testId: string, type: 'baseline' | 'latest' | 'diff') {
-        const dir = type === 'baseline' ? BASELINE_DIR : type === 'latest' ? LATEST_DIR : DIFF_DIR;
-        return path.join(dir, `${testId}.png`);
+    // CRUD Operations for Metadata
+    getAll(projectId: string): VisualTest[] {
+        const all = JSON.parse(fs.readFileSync(METADATA_FILE, 'utf-8'));
+        return all.filter((t: VisualTest) => t.projectId === projectId);
     }
 
-    async getTests(projectId: string = 'default') {
-        const { data, error } = await supabase
-            .from('visual_tests')
-            .select('*')
-            .eq('project_id', projectId);
-
-        if (error) throw new Error(error.message);
-        return data;
+    create(projectId: string, name: string, targetUrl: string): VisualTest {
+        const all = JSON.parse(fs.readFileSync(METADATA_FILE, 'utf-8'));
+        const newTest: VisualTest = {
+            id: uuidv4(),
+            projectId,
+            name,
+            target_url: targetUrl,
+            createdAt: new Date().toISOString(),
+            status: 'new'
+        };
+        all.push(newTest);
+        fs.writeFileSync(METADATA_FILE, JSON.stringify(all, null, 2));
+        return newTest;
     }
 
-    async createTest(name: string, targetUrl: string, projectId: string = 'default-project') {
-        const { data, error } = await supabase
-            .from('visual_tests')
-            .insert({ name, target_url: targetUrl, project_id: projectId })
-            .select()
-            .single();
-        if (error) throw new Error(error.message);
-        return data;
+    delete(id: string) {
+        let all = JSON.parse(fs.readFileSync(METADATA_FILE, 'utf-8'));
+        all = all.filter((t: VisualTest) => t.id !== id);
+        fs.writeFileSync(METADATA_FILE, JSON.stringify(all, null, 2));
+
+        // Cleanup images
+        const testDir = path.join(IMAGES_DIR, id);
+        if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     }
 
-    async runTest(testId: string): Promise<VisualMismatch> {
-        // 1. Fetch details
-        const { data: testData, error } = await supabase
-            .from('visual_tests')
-            .select('*')
-            .eq('id', testId)
-            .single();
+    // Core Logic: Run and Compare
+    async runTest(id: string): Promise<{ diffPercentage: number; status: string }> {
+        const all = JSON.parse(fs.readFileSync(METADATA_FILE, 'utf-8'));
+        const testIndex = all.findIndex((t: VisualTest) => t.id === id);
+        if (testIndex === -1) throw new Error('Test not found');
 
-        if (error || !testData) {
-            console.error('[VisualTest] DB Error:', error);
-            throw new Error("Visual Test not found");
-        }
-        console.log(`[VisualTest] Starting test for: ${testData.name} (${testData.target_url})`);
+        const test = all[testIndex];
+        const testDir = path.join(IMAGES_DIR, id);
+        if (!fs.existsSync(testDir)) fs.mkdirSync(testDir, { recursive: true });
 
-        // 2. Launch Browser
-        const browser = await chromium.launch({
-            headless: process.env.HEADLESS !== 'false',
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
+        const latestPath = path.join(testDir, 'latest.png');
+        const baselinePath = path.join(testDir, 'baseline.png');
+        const diffPath = path.join(testDir, 'diff.png');
 
+        console.log(`[VisualTest] Launching browser for: ${test.target_url}`);
+
+        // 1. Capture Screenshot
+        const browser = await chromium.launch();
         try {
-            const context = await browser.newContext();
-            const page = await context.newPage();
-
-            // 3. Navigate
-            console.log(`[VisualTest] Visiting ${testData.target_url}`);
-            try {
-                await page.goto(testData.target_url, { waitUntil: 'load', timeout: 30000 });
-            } catch (navError: any) {
-                console.error('[VisualTest] Navigation failed:', navError.message);
-                throw navError;
-            }
-
-            // Optional: wait for a bit
-            await page.waitForTimeout(1000);
-
-            // 4. Screenshot
-            const screenshotBuffer = await page.screenshot({ fullPage: true });
-
-            // 5. Compare
-            return await this.compare(testId, screenshotBuffer);
-
+            const page = await browser.newPage();
+            await page.setViewportSize({ width: 1280, height: 720 });
+            await page.goto(test.target_url, { waitUntil: 'networkidle' });
+            await page.screenshot({ path: latestPath, fullPage: true });
         } finally {
             await browser.close();
         }
-    }
 
-    // Logic: 
-    // 1. Snapshot taken by Puppeteer (buffer)
-    // 2. Identify Visual Test ID (or Script Name)
-    // 3. Save to Disk
-    // 4. Update DB record in `visual_snapshots`
-    async compare(testId: string, currentImageBuffer: Buffer): Promise<VisualMismatch> {
-        const baselinePath = this.getPath(testId, 'baseline');
-
-        // Save current run
-        await fs.promises.writeFile(this.getPath(testId, 'latest'), currentImageBuffer);
-
-        const hasBaseline = fs.existsSync(baselinePath);
+        // 2. Compare if baseline exists
         let diffPercentage = 0;
-        let status = 'new';
-        let imagePath = this.getPath(testId, 'latest');
+        let status: 'pass' | 'fail' | 'new' = 'pass';
 
-        if (hasBaseline) {
-            const baselineImg = PNG.sync.read(fs.readFileSync(baselinePath));
-            const currentImg = PNG.sync.read(currentImageBuffer);
-
-            const { width, height } = baselineImg;
+        if (fs.existsSync(baselinePath)) {
+            const img1 = PNG.sync.read(fs.readFileSync(baselinePath));
+            const img2 = PNG.sync.read(fs.readFileSync(latestPath));
+            const { width, height } = img1;
             const diff = new PNG({ width, height });
 
-            if (width !== currentImg.width || height !== currentImg.height) {
-                diffPercentage = 100; // Size mismatch
-                status = 'fail';
-            } else {
-                const numDiffPixels = pixelmatch(
-                    baselineImg.data, currentImg.data, diff.data, width, height, { threshold: 0.1 }
-                );
-                const totalPixels = width * height;
-                diffPercentage = (numDiffPixels / totalPixels) * 100;
-                status = diffPercentage > 0 ? 'fail' : 'pass';
-            }
+            const numDiffPixels = pixelmatch(img1.data, img2.data, diff.data, width, height, { threshold: 0.1 });
+            diffPercentage = (numDiffPixels / (width * height)) * 100;
 
-            if (diffPercentage > 0) {
-                fs.writeFileSync(this.getPath(testId, 'diff'), PNG.sync.write(diff));
-                imagePath = this.getPath(testId, 'diff');
-            }
+            fs.writeFileSync(diffPath, PNG.sync.write(diff));
+
+            if (diffPercentage > 0) status = 'fail';
+        } else {
+            // First run, no baseline -> Treat as new/pass
+            status = 'new';
         }
 
-        // Record Snapshot in DB
-        await supabase.from('visual_snapshots').insert({
-            visual_test_id: testId,
-            image_path: imagePath, // Storing local path for now (or relative URL)
-            is_baseline: hasBaseline,
-            diff_percentage: diffPercentage,
-            status: status
-        });
+        // 3. Update Result
+        all[testIndex].lastRun = new Date().toISOString();
+        all[testIndex].diffPercentage = diffPercentage;
+        all[testIndex].status = status;
+        fs.writeFileSync(METADATA_FILE, JSON.stringify(all, null, 2));
 
-        return { scriptId: testId, diffPercentage, hasBaseline };
+        return { diffPercentage, status };
     }
 
-    getImages(testId: string) {
-        return {
-            baseline: this.getPath(testId, 'baseline'),
-            latest: this.getPath(testId, 'latest'),
-            diff: this.getPath(testId, 'diff')
-        };
+    // Compare Buffer (Used by RecorderService)
+    async compare(id: string, screenshotBuffer: Buffer): Promise<{ hasBaseline: boolean, diffPercentage: number }> {
+        const testDir = path.join(IMAGES_DIR, id);
+        if (!fs.existsSync(testDir)) fs.mkdirSync(testDir, { recursive: true });
+
+        const latestPath = path.join(testDir, 'latest.png');
+        const baselinePath = path.join(testDir, 'baseline.png');
+        const diffPath = path.join(testDir, 'diff.png');
+
+        fs.writeFileSync(latestPath, screenshotBuffer);
+
+        if (fs.existsSync(baselinePath)) {
+            const img1 = PNG.sync.read(fs.readFileSync(baselinePath));
+            const img2 = PNG.sync.read(screenshotBuffer);
+            const { width, height } = img1;
+            const diff = new PNG({ width, height });
+
+            const numDiffPixels = pixelmatch(img1.data, img2.data, diff.data, width, height, { threshold: 0.1 });
+            const diffPercentage = (numDiffPixels / (width * height)) * 100;
+
+            fs.writeFileSync(diffPath, PNG.sync.write(diff));
+
+            // Update metadata if exists
+            try {
+                const all = JSON.parse(fs.readFileSync(METADATA_FILE, 'utf-8'));
+                const idx = all.findIndex((t: VisualTest) => t.id === id);
+                if (idx !== -1) {
+                    all[idx].lastRun = new Date().toISOString();
+                    all[idx].diffPercentage = diffPercentage;
+                    all[idx].status = diffPercentage > 0 ? 'fail' : 'pass';
+                    fs.writeFileSync(METADATA_FILE, JSON.stringify(all, null, 2));
+                }
+            } catch (e) {
+                // Ignore metadata update errors if test ID doesn't exist in visual_tests.json (might be a script ID)
+            }
+
+            return { hasBaseline: true, diffPercentage };
+        } else {
+            // Treat as new baseline
+            // Note: We don't automatically promote to baseline unless approved, but for Recorder flow
+            // it seems to treat first run as "New Baseline".
+            // Let's just save it.
+            return { hasBaseline: false, diffPercentage: 0 };
+        }
     }
 
-    async approveLatest(testId: string): Promise<void> {
-        const latestPath = this.getPath(testId, 'latest');
-        const baselinePath = this.getPath(testId, 'baseline');
+    // Approve: Promote Latest to Baseline
+    approve(id: string) {
+        const testDir = path.join(IMAGES_DIR, id);
+        const latestPath = path.join(testDir, 'latest.png');
+        const baselinePath = path.join(testDir, 'baseline.png');
 
         if (fs.existsSync(latestPath)) {
-            await fs.promises.copyFile(latestPath, baselinePath);
+            fs.copyFileSync(latestPath, baselinePath);
 
-            // Clean diff
-            const diffPath = this.getPath(testId, 'diff');
-            if (fs.existsSync(diffPath)) await fs.promises.unlink(diffPath);
-
-            // Update DB status to 'pass' or mark as baseline
-            // Ideally we insert a NEW snapshot record as baseline=true
-            await supabase.from('visual_snapshots').insert({
-                visual_test_id: testId,
-                image_path: baselinePath,
-                is_baseline: true,
-                diff_percentage: 0,
-                status: 'pass'
-            });
-
+            // Reset status
+            try {
+                const all = JSON.parse(fs.readFileSync(METADATA_FILE, 'utf-8'));
+                const idx = all.findIndex((t: VisualTest) => t.id === id);
+                if (idx !== -1) {
+                    all[idx].diffPercentage = 0;
+                    all[idx].status = 'pass';
+                    fs.writeFileSync(METADATA_FILE, JSON.stringify(all, null, 2));
+                }
+            } catch (e) {
+                // Ignore if not in metadata (e.g. script run)
+            }
         } else {
-            throw new Error("No latest run to approve");
+            throw new Error('No latest run to approve');
         }
     }
 
-    async deleteTest(testId: string): Promise<void> {
-        // 1. Delete from DB
-        const { error } = await supabase
-            .from('visual_tests')
-            .delete()
-            .eq('id', testId);
+    // Alias for the API call
+    approveBaseline(scriptId: string, runId: string) {
+        // For script executions, the ID used for folder storage is the scriptId
+        // In a real system, we might version by runId, but for now V1 uses scriptId as the 'test' container
+        this.approve(scriptId);
+    }
 
-        if (error) throw new Error(error.message);
-
-        // 2. Delete Clean Artifacts (Baselines, Latest, Diff)
-        const paths = [
-            this.getPath(testId, 'baseline'),
-            this.getPath(testId, 'latest'),
-            this.getPath(testId, 'diff')
-        ];
-
-        for (const p of paths) {
-            if (fs.existsSync(p)) {
-                await fs.promises.unlink(p).catch(console.error);
-            }
-        }
+    getImagePath(id: string, type: 'baseline' | 'latest' | 'diff'): string | null {
+        const p = path.join(IMAGES_DIR, id, `${type}.png`);
+        return fs.existsSync(p) ? p : null;
     }
 }
 

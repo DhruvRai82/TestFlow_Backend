@@ -1,6 +1,7 @@
 
 import { Router } from 'express';
 import { testRunnerService } from '../services/TestRunnerService';
+import { codeExecutorService } from '../services/CodeExecutorService';
 import { supabase } from '../lib/supabase';
 
 const router = Router();
@@ -24,6 +25,21 @@ router.post('/execute', async (req, res) => {
             source || 'manual'
         );
 
+        res.json(result);
+    } catch (error: any) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Ad-hoc Code Execution (IDE)
+router.post('/execute-raw', async (req, res) => {
+    try {
+        const { content, language } = req.body;
+        if (content === undefined || !language) {
+            return res.status(400).json({ error: 'content and language are required' });
+        }
+
+        const result = await codeExecutorService.executeCode(content, language);
         res.json(result);
     } catch (error: any) {
         res.status(500).json({ error: error.message });

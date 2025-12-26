@@ -21,6 +21,9 @@ import { apiLabRouter } from './routes/api-lab';
 import { runnerRoutes } from './routes/runner';
 import { settingsRoutes } from './routes/settings';
 import { aiRouter } from './routes/ai';
+import { adminDbRouter } from './routes/admin-db';
+import { fileSystemRoutes } from './routes/filesystem';
+import aiAnalyticsRoutes from './routes/ai-analytics';
 
 dotenv.config();
 
@@ -52,21 +55,27 @@ app.use('/api', authMiddleware); // Protect all /api routes
 
 // Routes Mapping
 app.use('/api/tests', scriptRoutes); // Mapped to scripts
-app.use('/api/recorder', recorderRoutes);
 app.use('/api/projects', projectRoutes);
+app.use('/api/scripts', scriptRoutes);
+app.use('/api/runner', runnerRoutes);
+app.use('/api/visual', visualTestRouter); // Kept original visualTestRouter
+app.use('/api/admin-inspector', adminDbRouter); // Kept original adminDbRouter
+app.use('/api/ai', aiRouter); // Added from the instruction's code edit
+app.use('/api/fs', fileSystemRoutes); // Added from the instruction's code edit
+app.use('/api/ai-analytics', aiAnalyticsRoutes); // Registered ai-analytics routes
+
+// Original routes that were not explicitly in the provided edit block but should remain
+app.use('/api/recorder', recorderRoutes);
 // Reports are handled within recorderRoutes or projectRoutes for now
-// app.use('/api/reports', reportRoutes); 
-app.use('/api/visual', visualTestRouter);
+// app.use('/api/reports', reportRoutes);
 app.use('/api/test-data', testDataRoutes);
 app.use('/api/schedules', schedulesRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/user', userRoutes);
 app.use('/api/git', gitRoutes);
-// Initialize Scheduler
-app.use('/api/runner', runnerRoutes);
 app.use('/api/lab', apiLabRouter);
 app.use('/api/settings', settingsRoutes);
-app.use('/api/ai', aiRouter);
+
 
 // Initialize Scheduler
 schedulerService.init().catch(err => console.error("Scheduler Init Failed:", err));

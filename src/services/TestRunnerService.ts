@@ -74,51 +74,88 @@ export class TestRunnerService {
             await this.logStep(runId, 0, 'start', 'info', `Starting execution of ${script.name}`);
 
             // 5. Execute Steps
-            // Assuming script.steps is the array of steps stored in JSON
             const steps = script.steps || [];
+            let stepsCompleted = 0;
+            let scriptWasHealed = false;
 
             for (let i = 0; i < steps.length; i++) {
                 const step = steps[i];
-                const target = this.parseSelector(step.target);
+                let target = this.parseSelector(step.target);
 
                 await this.logStep(runId, i + 1, step.command, 'info', `Executing: ${step.command} on ${step.target}`);
 
                 try {
-                    if (step.command === 'open') {
-                        await page.goto(step.target, { timeout: 30000 });
-                    }
-                    else if (step.command === 'click') {
-                        await page.click(target, { timeout: 10000 });
-                    }
-                    else if (step.command === 'type') {
+                    await this.executeStep(page!, step.command, target, step.value);
+                    await this.logStep(runId, i + 1, step.command, 'pass', `Step ${i + 1} passed`);
+                    stepsCompleted++;
+                } catch (stepError: any) {
+
+                    // --- SELF HEALING LOGIC ---
+                    const errorMessage = stepError.message || '';
+                    if ((errorMessage.includes('Timeout') || errorMessage.includes('waiting for selector')) && step.command !== 'open') {
+                        console.log(`[TestRunner] 🩹 Step failed with timeout. Attempting Self-Healing for element: ${target} ...`);
+                        await this.logStep(runId, i + 1, 'heal', 'warning', `Attempting self-healing for: ${target}`);
+
                         try {
-                            await page.fill(target, step.value || '', { timeout: 5000 });
-                        } catch (fillError: any) {
-                            // Fallback for Checkboxes/Radios which throw "cannot be filled"
-                            if (fillError.message.includes('cannot be filled')) {
-                                console.log('[TestRunner] Input cannot be filled, attempting check/click...');
-                                // If value implies checked
-                                if (step.value === 'on' || step.value === 'true') {
-                                    await page.check(target, { timeout: 5000 });
-                                } else {
-                                    await page.click(target, { timeout: 5000 });
-                                }
+                            const htmlSnapshot = await page!.content();
+                            const { genAIService } = await import('./GenAIService');
+                            const healedSelector = await genAIService.healSelector(htmlSnapshot, target, errorMessage);
+
+                            if (healedSelector) {
+                                console.log(`[TestRunner] ✨ AI found a potential new selector: ${healedSelector}`);
+                                await this.logStep(runId, i + 1, 'heal', 'info', `AI suggested: ${healedSelector}`);
+
+                                // Retry with new selector
+                                await this.executeStep(page!, step.command, healedSelector, step.value);
+
+                                // Update script object in memory if successful
+                                console.log(`[TestRunner] ✅ Retry successful! Updating script...`);
+                                script.steps[i].target = healedSelector;
+                                scriptWasHealed = true;
+
+                                await this.logStep(runId, i + 1, step.command, 'pass', `Step healed and passed`);
+                                stepsCompleted++;
+                                continue;
                             } else {
-                                throw fillError;
+                                await this.logStep(runId, i + 1, 'heal', 'fail', `AI could not find a fix.`);
                             }
+                        } catch (healError) {
+                            console.error('[TestRunner] Healing failed:', healError);
                         }
                     }
-                    else if (step.command === 'wait') {
-                        await page.waitForTimeout(parseInt(step.value) || 1000);
-                    }
-                    // Add more commands (assert, etc.) here as needed
+                    // ---------------------------
 
-                    await this.logStep(runId, i + 1, step.command, 'pass', `Step ${i + 1} passed`);
-                } catch (stepError: any) {
                     console.error(`[TestRunner] Step ${i + 1} failed:`, stepError.message);
                     await this.logStep(runId, i + 1, step.command, 'fail', `Failed: ${stepError.message}`);
-                    throw stepError; // Re-throw to catch block to fail the run
+                    throw stepError;
                 }
+            }
+
+            // 5b. Visual Check
+            if (process.env.ENABLE_VISUAL_TESTS !== 'false') {
+                try {
+                    await this.logStep(runId, 998, 'visual', 'info', 'Performing Visual Regression Check...');
+                    const screenshotBuffer = await page!.screenshot({ fullPage: true });
+                    const { visualTestService } = await import('./VisualTestService');
+                    const visualResult = await visualTestService.compare(script.id, screenshotBuffer);
+
+                    if (visualResult.hasBaseline && visualResult.diffPercentage > 0) {
+                        await this.logStep(runId, 998, 'visual', 'warning', `Visual Mismatch: ${visualResult.diffPercentage.toFixed(2)}%`);
+                    } else if (!visualResult.hasBaseline) {
+                        await this.logStep(runId, 998, 'visual', 'info', 'New Baseline Created.');
+                    } else {
+                        await this.logStep(runId, 998, 'visual', 'pass', 'Visual Check Passed.');
+                    }
+                } catch (e: any) {
+                    console.error('[TestRunner] Visual Test Error', e);
+                    await this.logStep(runId, 998, 'visual', 'fail', `Visual Test Error: ${e.message}`);
+                }
+            }
+
+            // 5c. Persist Healing
+            if (scriptWasHealed) {
+                await supabase.from('recorded_scripts').update({ steps: script.steps }).eq('id', scriptId);
+                await this.logStep(runId, 999, 'save', 'info', 'Script updated with healed selectors');
             }
 
             // 6. Success Completion
@@ -132,14 +169,12 @@ export class TestRunnerService {
                 })
                 .eq('id', runId);
 
-            await this.logStep(runId, 999, 'end', 'info', 'Test completed successfully');
+            await this.logStep(runId, 1000, 'end', 'info', 'Test completed successfully');
 
             return { status: 'passed', runId, duration };
 
         } catch (error: any) {
             console.error('[TestRunner] Run Failed:', error);
-
-            // 7. Failure Completion
             if (runId) {
                 const duration = Date.now() - startTime;
                 await supabase
@@ -155,6 +190,33 @@ export class TestRunnerService {
             return { status: 'failed', error: error.message, runId };
         } finally {
             if (browser) await browser.close();
+        }
+    }
+
+    private async executeStep(page: Page, command: string, target: string, value: string) {
+        if (command === 'open') {
+            await page.goto(target, { timeout: 30000 });
+        }
+        else if (command === 'click') {
+            await page.click(target, { timeout: 10000 });
+        }
+        else if (command === 'type') {
+            try {
+                await page.fill(target, value || '', { timeout: 5000 });
+            } catch (fillError: any) {
+                if (fillError.message.includes('cannot be filled')) {
+                    if (value === 'on' || value === 'true') {
+                        await page.check(target, { timeout: 5000 });
+                    } else {
+                        await page.click(target, { timeout: 5000 });
+                    }
+                } else {
+                    throw fillError;
+                }
+            }
+        }
+        else if (command === 'wait') {
+            await page.waitForTimeout(parseInt(value) || 1000);
         }
     }
 
