@@ -14,7 +14,7 @@ import { projectRoutes } from './routes/projects';
 import { visualTestRouter } from './routes/visual-tests';
 import testDataRoutes from './routes/test-data'; // Default export
 import schedulesRoutes from './routes/schedules'; // Default export
-import { adminRoutes } from './routes/admin';
+
 import { userRoutes } from './routes/user';
 import { gitRoutes } from './routes/git';
 import { apiLabRouter } from './routes/api-lab';
@@ -22,6 +22,10 @@ import { runnerRoutes } from './routes/runner';
 import { settingsRoutes } from './routes/settings';
 import { aiRouter } from './routes/ai';
 import { adminDbRouter } from './routes/admin-db';
+import { adminTasksRouter } from './routes/admin-tasks';
+import { adminUsersRouter } from './routes/admin-users';
+import { adminChatsRouter } from './routes/admin-chats'; // Added
+import { authRouter } from './routes/auth';
 import { fileSystemRoutes } from './routes/filesystem';
 import aiAnalyticsRoutes from './routes/ai-analytics';
 
@@ -50,8 +54,10 @@ app.get('/health', (req, res) => {
     res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
+app.use('/api/auth', authRouter); // Moved UP: Public Auth Routes
+
 // Protected Routes
-app.use('/api', authMiddleware); // Protect all /api routes
+app.use('/api', authMiddleware); // Protect all remaining /api routes
 
 // Routes Mapping
 app.use('/api/tests', scriptRoutes); // Mapped to scripts
@@ -60,7 +66,11 @@ app.use('/api/scripts', scriptRoutes);
 app.use('/api/runner', runnerRoutes);
 app.use('/api/visual', visualTestRouter); // Kept original visualTestRouter
 app.use('/api/admin-inspector', adminDbRouter); // Kept original adminDbRouter
-app.use('/api/ai', aiRouter); // Added from the instruction's code edit
+app.use('/api/admin/tasks', adminTasksRouter);
+app.use('/api/admin/users', adminUsersRouter);
+app.use('/api/admin/chats', adminChatsRouter); // Added
+// app.use('/api/auth', authRouter); // Moved down -> up
+app.use('/api/user', userRoutes); // Added from the instruction's code edit
 app.use('/api/fs', fileSystemRoutes); // Added from the instruction's code edit
 app.use('/api/ai-analytics', aiAnalyticsRoutes); // Registered ai-analytics routes
 
@@ -70,8 +80,8 @@ app.use('/api/recorder', recorderRoutes);
 // app.use('/api/reports', reportRoutes);
 app.use('/api/test-data', testDataRoutes);
 app.use('/api/schedules', schedulesRoutes);
-app.use('/api/admin', adminRoutes);
-app.use('/api/user', userRoutes);
+
+// app.use('/api/user', userRoutes); // Removed Duplicate
 app.use('/api/git', gitRoutes);
 app.use('/api/lab', apiLabRouter);
 app.use('/api/settings', settingsRoutes);
@@ -79,6 +89,9 @@ app.use('/api/settings', settingsRoutes);
 
 // Initialize Scheduler
 schedulerService.init().catch(err => console.error("Scheduler Init Failed:", err));
+
+// Initialize Recorder Socket
+recorderService.setSocket(io);
 
 httpServer.listen(Number(PORT), '0.0.0.0', () => {
     console.log(`✅ Test Management Backend running on port ${PORT}`);
